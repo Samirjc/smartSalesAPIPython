@@ -203,6 +203,3 @@ def get_related_products(sku):
         })
     else:
         return jsonify({"message": "Não há produtos relacionados disponíveis"}), 404
-
-# Executando a aplicação Flask
-app.run(debug=True)
