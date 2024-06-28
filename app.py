@@ -1,5 +1,13 @@
 from flask import Flask, jsonify, request
 from functools import wraps
+import os.path
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 
 # Dados fictícios de produtos
 products = [
@@ -124,17 +132,93 @@ def verify_token(f):
 
     return decorated_function
 
+
+
+def convert_to_desired_format(data_list):
+    # Removendo o cabeçalho da lista
+    header = data_list[0]
+    data_list = data_list[1:]
+
+    products = []
+
+    for item in data_list:
+        product = {}
+        for i in range(len(header)):
+            if header[i] == "originalValue" or header[i] == "currentValue":
+                product[header[i]] = float(item[i]) if item[i] else None
+            elif header[i] == "unitQuantity":
+                product[header[i]] = int(item[i]) if item[i] else None
+            elif header[i] == "image":
+                product["images"] = [{
+                    "imageUrl": item[i],
+                    "order": 1
+                }]
+            elif header[i] == "extras":
+                product[header[i]] = None if item[i] == "None" else item[i]
+            else:
+                product[header[i]] = item[i]
+        products.append(product)
+
+    return products
+
+
+# If modifying these scopes, delete the file token.json.
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# The ID and range of a sample spreadsheet.
+SAMPLE_SPREADSHEET_ID = "154sAxf5g9gWor6EkkBctnECfojIFRHrl4cRxpmhl-nc"
+SAMPLE_RANGE_NAME = "Página1!A1:K13"
+
+
+#Pega informações da tabela do Google Sheets
+def get_data_google_sheets():
+    """Shows basic usage of the Sheets API.
+        Prints values from a sample spreadsheet.
+    """
+    creds = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "credentials.json", SCOPES
+            )
+            creds = flow.run_local_server(port=8080)
+        # Save the credentials for the next run
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build("sheets", "v4", credentials=creds)
+
+        # Call the Sheets API
+        sheet = service.spreadsheets()
+        result = (
+            sheet.values()
+            .get(spreadsheetId=SAMPLE_SPREADSHEET_ID, range=SAMPLE_RANGE_NAME)
+            .execute()
+        )
+
+        return convert_to_desired_format(result['values'])
+
+    except HttpError as err:
+        return err
+
 # Configurando os endpoints protegidos com verificação de token
 
 # Endpoint /api/products (GET) para retornar a lista de produtos
 @app.route('/api/products', methods=['GET'])
-@verify_token
 def get_products():
-    return jsonify({"products": products})
+    return get_data_google_sheets()
 
 # Endpoint /api/products (POST) para filtrar produtos
 @app.route('/api/products', methods=['POST'])
-@verify_token
 def filter_products():
     req_data = request.json
     filter_keyword = req_data.get('filter', '')
@@ -142,7 +226,7 @@ def filter_products():
     categories_filter = req_data.get('categories', [])
 
     filtered_products = []
-    for product in products:
+    for product in get_data_google_sheets():
         # Verifica se o filtro está presente no nome, descrição, categoria ou marca do produto
         if (filter_keyword.lower() in product['name'].lower() or
             filter_keyword.lower() in product['description'].lower() or
@@ -159,15 +243,13 @@ def filter_products():
 
 # Endpoint /api/products/categories (GET) para retornar categorias de produtos únicas
 @app.route('/api/products/categories', methods=['GET'])
-@verify_token
 def get_categories():
-    categories = set(product['category'] for product in products)
+    categories = set(product['category'] for product in get_data_google_sheets())
     categories_list = [{"name": category} for category in categories]
     return jsonify({"categories": categories_list})
 
 # Endpoint /api/products/brands (GET) para retornar marcas de produtos únicas
 @app.route('/api/products/brands', methods=['GET'])
-@verify_token
 def get_brands():
     brands = set(product['brand'] for product in products)
     brands_list = [{"name": brand} for brand in brands]
@@ -175,22 +257,20 @@ def get_brands():
 
 # Endpoint /api/products/{sku} (GET) para retornar detalhes de um produto específico
 @app.route('/api/products/<string:sku>', methods=['GET'])
-@verify_token
 def get_product_by_sku(sku):
-    for product in products:
+    for product in get_data_google_sheets():
         if product['sku'] == sku:
             return jsonify(product)
     return jsonify({"message": "Produto não encontrado"}), 404
 
 # Endpoint /api/products/relatedProducts/{sku} (GET) para retornar produtos relacionados
 @app.route('/api/products/relatedProducts/<string:sku>', methods=['GET'])
-@verify_token
 def get_related_products(sku):
     related_products = []
-    for product in products:
+    for product in get_data_google_sheets():
         if product['sku'] == sku:
             related_category = product['category']
-            related_products = [p for p in products if p['category'] == related_category]
+            related_products = [p for p in get_data_google_sheets() if p['category'] == related_category]
 
     if related_products:
         return jsonify({
